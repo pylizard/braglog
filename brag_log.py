@@ -21,6 +21,8 @@ from AppKit import (
     NSScrollView,
     NSMakeRect,
     NSBezelBorder,
+    NSComboBox,
+    NSClickGestureRecognizer,
 )
 from Foundation import NSObject
 from PyObjCTools import AppHelper
@@ -38,6 +40,19 @@ def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS project (
+                name TEXT PRIMARY KEY
+            );
+        """)
+
+def get_projects():
+    with sqlite3.connect(DB_PATH) as conn:
+        projects = [row[0] for row in conn.execute("SELECT name FROM project ORDER BY name")]
+        projects.sort(key=str.casefold)
+        return projects
+
 
 # ——————— View Controller for the popover ————————
 
@@ -66,12 +81,16 @@ class EntryViewController(NSViewController):
         self.textView.setEditable_(True)
         self.textView.setSelectable_(True)
         self.textView.setAllowsUndo_(True)
-
         v.addSubview_(self.scroll1)
 
-        # Project field
-        self.projectField = NSTextField.alloc().initWithFrame_(((10, height - 130), (width - 20, 24)))
+        self.projectField = NSComboBox.alloc().initWithFrame_(((10, height - 130), (width - 20, 24)))
+        self.projectField.setUsesDataSource_(False)  # For simple auto-fill mode
+        self.projectField.setEditable_(True)
+
         self.projectField.setPlaceholderString_("Optional project tag")
+        self.projectField.setDelegate_(self)
+        clicker = NSClickGestureRecognizer.alloc().initWithTarget_action_(self, "projectClicked:")
+        self.projectField.addGestureRecognizer_(clicker)
         v.addSubview_(self.projectField)
 
         # Save button, now pulled up
@@ -93,14 +112,40 @@ class EntryViewController(NSViewController):
 
         if msg:
             with sqlite3.connect(DB_PATH) as conn:
-                conn.execute(
-                    "INSERT INTO logs (message, project) VALUES (?, ?)",
-                    (msg, project)
-                )
+
+                if project:
+                    conn.execute("INSERT OR IGNORE INTO project (name) VALUES (?)", (project,))
+
+                conn.execute("INSERT INTO logs (message, project) VALUES (?, ?)", (msg, project))
+
+            # Update combobox items dynamically
+            existing = set(self.projectField.objectValues())
+
+            if project and project not in existing:
+                self.projectField.addItemWithObjectValue_(project)
 
         self.textView.setString_("")
         self.projectField.setStringValue_("")
         self.popover.performClose_(None)
+
+    def controlTextDidChange_(self, notification):
+        if notification.object() is self.projectField:
+            prefix = self.projectField.stringValue()
+
+        # case‐insensitive filter
+        matches = [p for p in self.projects if prefix.lower() in p.lower()]
+        self.projectField.removeAllItems()
+        self.projectField.addItemsWithObjectValues_(matches)
+
+    @objc.IBAction
+    def projectClicked_(self, sender):
+        # restore full sorted list
+        self.projects = get_projects()
+        self.projectField.removeAllItems()
+        self.projectField.addItemsWithObjectValues_(self.projects)
+
+        # open the dropdown
+        self.projectField.cell().popUp_(None)
 
     # Register with PyObjC runtime
     saveEntry_ = objc.selector(saveEntry_, signature=b'v@:@')
@@ -146,8 +191,7 @@ class AppDelegate(NSObject):
 
         statusMenu = NSMenu.alloc().init()
 
-        newItem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("New Entry",
-                                                                         "togglePopover:", "n")
+        newItem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("New Entry", "togglePopover:", "n")
         newItem.setTarget_(self)
         statusMenu.addItem_(newItem)
 
